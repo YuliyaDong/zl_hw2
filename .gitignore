@@ -1,0 +1,10 @@
+iccv09Data/
+iccv09Data.tar.gz
+checkpoints/
+logs/
+wandb/
+__pycache__/
+*.zip
+*.tar.gz
+*.pth
+HW2_深度学习与空间智能.pdf

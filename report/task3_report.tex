@@ -1,0 +1,252 @@
+\documentclass[UTF8,a4paper,12pt,fontset=fandol]{ctexart}
+
+\usepackage[a4paper,margin=2.2cm]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{float}
+\usepackage{hyperref}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{caption}
+\usepackage{amsmath}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    urlcolor=blue,
+    citecolor=blue
+}
+
+\title{基于 U-Net 的语义分割与损失函数对比}
+\author{姓名：XXX \quad 学号：XXXXXXXXX}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+本实验围绕户外场景语义分割任务展开，基于 Stanford Background Dataset（ICCV 2009），从零实现标准 U-Net 模型，并对比三种损失函数——交叉熵（CE）、Dice Loss 以及二者组合（CE + Dice）——对分割性能的影响。实验以 mIoU 作为主要评价指标，在 8:2 的训练验证划分下进行 50 epoch 训练。结果表明：Combined Loss（CE + Dice）表现最优，验证集 mIoU 达到 0.6083，相比纯 CE（0.5878）提升约 2.1 个百分点，相比纯 Dice（0.5768）提升约 3.2 个百分点，验证了组合损失在语义分割任务中兼顾像素级精度与区域重叠度的互补优势。
+\end{abstract}
+
+\section{实验目标}
+本实验围绕基于 U-Net 的语义分割任务展开，具体包括三部分内容：首先基于 Stanford Background Dataset 构建 8 类户外场景语义分割数据集；其次从零实现标准 U-Net 模型，不使用任何预训练权重；最后对比三种不同损失函数（CE、Dice、Combined）的分割性能，以 mIoU 为主要评价指标，分析不同损失函数对分割效果的影响。
+
+\section{数据集与实验环境}
+
+\subsection{数据集}
+本实验使用 \textbf{Stanford Background Dataset}（ICCV 2009），这是一个经典的户外场景语义分割数据集。
+
+\begin{itemize}
+    \item 图像总数：715 张真实户外场景照片（JPEG 格式）；
+    \item 标注格式：每张图像对应一个 \texttt{.regions.txt} 文件，记录每个像素的类别 ID（整数矩阵）；
+    \item 无效像素：标注中值为 $-1$ 的像素表示无效区域，训练中映射为 $255$ 并忽略。
+\end{itemize}
+
+数据集共包含 8 个语义类别：
+
+\begin{table}[H]
+\centering
+\caption{Stanford Background Dataset 语义类别}
+\begin{tabular}{cc}
+\toprule
+类别 ID & 类别名称 \\
+\midrule
+0 & Sky（天空） \\
+1 & Tree（树木） \\
+2 & Road（道路） \\
+3 & Grass（草地） \\
+4 & Water（水体） \\
+5 & Building（建筑） \\
+6 & Mountain（山脉） \\
+7 & Foreground Object（前景物体） \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{训练/验证划分}
+使用固定随机种子（$\text{seed}=42$）对 715 张图像进行打乱后，按 $8:2$ 比例划分：
+
+\begin{table}[H]
+\centering
+\caption{数据集划分}
+\begin{tabular}{cc}
+\toprule
+子集 & 数量 \\
+\midrule
+训练集 & 572 张 \\
+验证集 & 143 张 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+训练集开启随机水平翻转数据增强，验证集不做增强。
+
+\subsection{实验环境}
+\begin{itemize}
+    \item 操作系统：Linux 服务器；
+    \item 框架：PyTorch，CUDA 加速；
+    \item 实验管理：Weights \& Biases（wandb）；
+    \item 运行命令：
+    \begin{verbatim}
+python train.py --loss ce       --exp_name unet_ce
+python train.py --loss dice     --exp_name unet_dice
+python train.py --loss combined --exp_name unet_combined
+    \end{verbatim}
+\end{itemize}
+
+\section{模型结构}
+
+本实验从零实现标准 U-Net（无预训练权重），由编码器（Encoder）、瓶颈层（Bottleneck）和解码器（Decoder）三部分构成，编解码器之间通过 Skip Connection 拼接对应层的特征图。
+
+\subsection{基本模块}
+
+\textbf{DoubleConv}：两次 $\text{Conv2d}(3\times3,\ \text{padding}=1) \to \text{BatchNorm2d} \to \text{ReLU}$，使用 $\text{bias}=\text{False}$ 配合 BN。
+
+\textbf{Down}：$\text{MaxPool2d}(2\times2) \to \text{DoubleConv}$，空间尺寸减半，通道数翻倍。
+
+\textbf{Up}：$\text{Bilinear Upsample}(\times2) \to \text{Concat(Skip)} \to \text{DoubleConv}$，空间尺寸翻倍，与编码器对应层拼接。
+
+\subsection{通道配置}
+
+\begin{table}[H]
+\centering
+\caption{U-Net 各层通道配置}
+\begin{tabular}{lccc}
+\toprule
+模块 & 输入通道 & 输出通道 & 空间尺寸 \\
+\midrule
+enc1 (DoubleConv) & 3 & 64 & $H \times W$ \\
+enc2 (Down) & 64 & 128 & $H/2 \times W/2$ \\
+enc3 (Down) & 128 & 256 & $H/4 \times W/4$ \\
+enc4 (Down) & 256 & 512 & $H/8 \times W/8$ \\
+bottleneck (Down) & 512 & 1024 & $H/16 \times W/16$ \\
+dec1 (Up) & $1024+512$ & 512 & $H/8 \times W/8$ \\
+dec2 (Up) & $512+256$ & 256 & $H/4 \times W/4$ \\
+dec3 (Up) & $256+128$ & 128 & $H/2 \times W/2$ \\
+dec4 (Up) & $128+64$ & 64 & $H \times W$ \\
+out\_conv ($1\times1$ Conv) & 64 & 8 & $H \times W$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{itemize}
+    \item 输入：$(B, 3, H, W)$，RGB 图像；
+    \item 输出：$(B, 8, H, W)$，每个像素对应 8 类的 logits；
+    \item 参数量：约 31.04M；
+    \item 权重初始化：卷积层使用 Kaiming Normal（$\text{fan\_out}$, $\text{relu}$），BN 层 $\text{weight}=1$, $\text{bias}=0$。
+\end{itemize}
+
+\section{实验设置}
+
+\subsection{图像预处理}
+\begin{itemize}
+    \item Resize：统一缩放至 $256 \times 320$（$H \times W$）；
+    \item 标准化：ImageNet 均值/方差，$\text{mean}=[0.485, 0.456, 0.406]$，$\text{std}=[0.229, 0.224, 0.225]$；
+    \item 标签插值：最近邻插值（Nearest Neighbor），保证类别 ID 不失真。
+\end{itemize}
+
+\subsection{超参数设置}
+\begin{table}[H]
+\centering
+\caption{训练超参数}
+\begin{tabular}{lc}
+\toprule
+超参数 & 值 \\
+\midrule
+Batch Size & 8 \\
+初始 Learning Rate & $10^{-3}$ \\
+优化器 & AdamW（weight\_decay=$10^{-4}$） \\
+学习率调度 & Cosine Annealing（$T_{\max}=50$, $\eta_{\min}=10^{-6}$） \\
+Epoch & 50 \\
+输入尺寸 & $256 \times 320$ \\
+类别数 & 8 \\
+忽略标签 & 255 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{损失函数}
+
+本实验对比三种损失函数配置：
+
+\textbf{（1）Cross-Entropy Loss（CE）}
+
+\begin{equation}
+\mathcal{L}_{\text{CE}} = -\sum_{i} y_i \log \hat{p}_i
+\end{equation}
+
+标准多类别交叉熵，忽略 $\text{ignore\_index}=255$ 的像素。直接优化每个像素的分类概率。
+
+\textbf{（2）Dice Loss}
+
+\begin{equation}
+\mathcal{L}_{\text{Dice}} = 1 - \frac{1}{C} \sum_{c=1}^{C} \frac{2 \cdot |\hat{P}_c \cap Y_c| + \epsilon}{|\hat{P}_c| + |Y_c| + \epsilon}
+\end{equation}
+
+对每个类别分别计算 Dice 系数后取均值，$\text{smooth}=1.0$，忽略 $255$ 像素。直接优化区域重叠度，对类别不平衡更鲁棒。
+
+\textbf{（3）Combined Loss（CE + Dice）}
+
+\begin{equation}
+\mathcal{L}_{\text{Combined}} = 0.5 \cdot \mathcal{L}_{\text{CE}} + 0.5 \cdot \mathcal{L}_{\text{Dice}}
+\end{equation}
+
+等权重组合，同时兼顾像素级分类精度与区域重叠度。
+
+\subsection{评价指标}
+
+使用 \textbf{mean Intersection over Union（mIoU）} 作为主要评价指标：
+
+\begin{equation}
+\text{mIoU} = \frac{1}{C'} \sum_{c \in C'} \frac{TP_c}{TP_c + FP_c + FN_c}
+\end{equation}
+
+其中 $C'$ 为当前 batch 中实际出现的类别（跳过分母为 $0$ 的类别），忽略标签为 $255$ 的像素。
+
+\section{实验结果与分析}
+
+\subsection{定量结果}
+
+三组实验（各独立运行 50 epoch）的最终指标如下：
+
+\begin{table}[H]
+\centering
+\caption{不同损失函数下的分割性能对比}
+\begin{tabular}{lccc}
+\toprule
+损失函数 & Best val mIoU & Final train mIoU & Final val Loss \\
+\midrule
+CE & 0.5878 & 0.6692 & 0.4765 \\
+Dice & 0.5768 & 0.6269 & 0.3323 \\
+\textbf{Combined（CE+Dice）} & \textbf{0.6083} & \textbf{0.6886} & 0.4178 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{结果分析}
+
+\textbf{Combined Loss 效果最佳}，val mIoU 达到 0.6083，比纯 CE（0.5878）提升约 2.1 个百分点，比纯 Dice（0.5768）提升约 3.2 个百分点。
+
+\textbf{Dice Loss 单独使用效果最差}，尽管 val loss 数值最低（0.3323），但 val mIoU 反而不如 CE。这是因为 Dice Loss 的数值尺度与 CE 不同，单独使用时缺乏像素级精确监督，导致边界处分割质量下降。
+
+\textbf{CE Loss} 表现中规中矩，训练稳定，mIoU 居中。
+
+\textbf{结论}：CE 与 Dice 的组合损失能够互补两者的优势——CE 提供稳定的逐像素监督，Dice 提高对类别不平衡的鲁棒性——因此在语义分割任务上，Combined Loss 是更优的选择。
+
+\subsection{训练过程可视化}
+
+本实验使用 Weights \& Biases 记录训练过程中的 loss 与验证指标变化，项目链接：\url{https://wandb.ai/astridbunny-fudan-university-school-of-management/hw2_task3_unet}。
+
+（此处可插入 wandb 训练曲线截图：train/loss、val/loss、train/mIoU、val/mIoU、lr 曲线）
+
+\section{结论}
+本实验完成了基于 U-Net 的户外场景语义分割任务，在 Stanford Background Dataset 上对比了三种损失函数（CE、Dice、Combined）的分割性能。实验结果表明：Combined Loss（CE + Dice）取得了最优的验证集 mIoU 0.6083，验证了组合损失能够兼顾像素级分类精度与区域重叠度的互补优势。纯 Dice Loss 单独使用时效果最差，说明在语义分割中逐像素的交叉熵监督仍不可替代，Dice Loss 更适合作为辅助项而非独立损失函数。总体而言，本实验验证了从零构建 U-Net 进行语义分割的可行性，并为损失函数选择提供了实证参考。
+
+\section{提交信息}
+\begin{itemize}
+    \item GitHub 仓库链接：\textcolor{red}{https://github.com/astridbunny/DeepLearning-hw2-task3}
+    \item 模型权重网盘链接：\textcolor{red}{https://drive.google.com/file/d/15osUwQZFRYiBovdzoLG7Y37btuXlRO6P/view?usp=drive\_link}
+\end{itemize}
+
+\end{document}

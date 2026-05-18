@@ -1,0 +1,235 @@
+\documentclass[UTF8,a4paper,12pt,fontset=fandol]{ctexart}
+
+\usepackage[a4paper,margin=2.2cm]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{float}
+\usepackage{hyperref}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{xcolor}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    urlcolor=blue,
+    citecolor=blue
+}
+
+\title{基于 YOLOv8 的场景目标检测与视频多目标跟踪}
+\author{姓名：姜敬双 \quad 学号：25210980055}
+\date{\today}
+
+\newcommand{\missingfigure}[2][0.85\textwidth]{
+    \fbox{
+        \parbox[c][0.24\textheight][c]{#1}{
+            \centering #2
+        }
+    }
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+本实验围绕场景车辆目标检测与视频多目标跟踪任务展开，基于 Road Vehicle Images Dataset 对 YOLOv8s 模型进行训练与比较，并进一步完成测试视频中的多目标跟踪、遮挡与瞬时漏检分析以及越线计数实验。本文设计了预训练微调与随机初始化训练等多组对比实验，从 Precision、Recall、mAP@0.5 和 mAP@0.5:0.95 等指标分析模型性能，并选取最佳检测模型用于后续视频任务。实验结果表明：采用预训练权重初始化的 YOLOv8s 微调方案表现最佳；视频跟踪中大部分车辆能够维持稳定 ID，但在局部复杂片段中仍会出现由瞬时漏检引发的 ID 跳变；越线统计结果在不同检测置信度阈值下保持一致，说明该统计方法具有较好的稳定性。
+\end{abstract}
+
+\section{实验目标}
+本实验围绕场景车辆目标检测与视频多目标跟踪展开，具体包括四部分内容：首先在 Road Vehicle Images Dataset 数据集上微调训练 YOLOv8 检测模型；其次将训练好的模型应用到测试视频中，输出带有边界框、类别标签与 Tracking ID 的逐帧跟踪结果；随后选取遮挡或检测不连续片段，分析目标丢失与 ID 跳变现象；最后在视频中设置虚拟线，实现车辆越线统计。
+
+\section{数据集与实验环境}
+
+\subsection{数据集}
+本实验使用老师提供的 Road Vehicle Images Dataset。数据集已经整理为 YOLO 标注格式，目录结构包含训练集与验证集：
+\begin{itemize}
+    \item 训练集：2704 张图像，2704 个标签文件；
+    \item 验证集：300 张图像，300 个标签文件；
+    \item 标注格式：YOLO txt 格式，内容为 \texttt{class\_id x\_center y\_center width height}。
+\end{itemize}
+
+数据集共包含 21 个类别：
+\begin{quote}
+\small\ttfamily
+ambulance, army vehicle, auto rickshaw, bicycle, bus, car, garbagevan, human hauler,
+minibus, minivan, motorbike, pickup, policecar, rickshaw, scooter, suv, taxi,
+three wheelers -CNG-, truck, van, wheelbarrow
+\end{quote}
+
+\subsection{实验环境}
+\begin{itemize}
+    \item 操作系统：Linux 服务器；
+    \item Python：3.10.18；
+    \item PyTorch：2.6.0 + CUDA 12.4；
+    \item Ultralytics：8.4.41；
+    \item 显卡：NVIDIA GeForce RTX 4090；
+    \item 训练与推理设备：固定使用 5 号 GPU。
+\end{itemize}
+
+\section{检测模型与训练设置}
+
+\subsection{模型选择}
+本实验选用 YOLOv8s 作为目标检测模型。考虑到作业要求不能直接使用官方参数作为最终结果，因此本实验采用“预训练权重初始化后微调”和“随机初始化从零训练”两类方案进行对比。
+
+\subsection{训练设置}
+\begin{itemize}
+    \item 输入尺寸：640；
+    \item Batch size：16；
+    \item 优化方式：Ultralytics 默认优化器配置；
+    \item 评价指标：Precision、Recall、mAP@0.5、mAP@0.5:0.95；
+    \item 训练日志记录：本地输出文件与 Weights \& Biases 可视化截图。
+\end{itemize}
+
+\subsection{多组实验设计}
+为比较不同超参数和初始化方式对检测效果的影响，设计了四组实验：
+\begin{enumerate}
+    \item \texttt{yv8s\_ft\_base}：使用 \texttt{yolov8s.pt} 预训练权重初始化，学习率 0.01，训练 100 epoch；
+    \item \texttt{yv8s\_ft\_low\_lr}：使用 \texttt{yolov8s.pt} 预训练权重初始化，学习率 0.005，训练 100 epoch；
+    \item \texttt{yv8s\_ft\_longer}：使用 \texttt{yolov8s.pt} 预训练权重初始化，学习率 0.005，训练 150 epoch；
+    \item \texttt{yv8s\_scratch}：使用 \texttt{yolov8s.yaml} 从零开始训练，学习率 0.01，训练 150 epoch。
+\end{enumerate}
+
+\section{检测实验结果与模型选择}
+
+\subsection{多组实验结果对比}
+\begin{table}[H]
+\centering
+\caption{不同训练设置下的验证集性能对比}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{lcccccc}
+\toprule
+Run Name & Init & Epochs & LR & Precision & Recall & mAP@0.5 / mAP@0.5:0.95 \\
+\midrule
+\texttt{yv8s\_ft\_base} & pretrained & 100 & 0.01 & 0.697 & 0.510 & 0.566 / 0.315 \\
+\texttt{yv8s\_ft\_low\_lr} & pretrained & 100 & 0.005 & 0.623 & 0.470 & 0.505 / 0.297 \\
+\texttt{yv8s\_ft\_longer} & pretrained & 150 & 0.005 & 0.658 & 0.503 & 0.532 / 0.306 \\
+\texttt{yv8s\_scratch} & scratch & 150 & 0.01 & 0.489 & 0.484 & 0.451 / 0.249 \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+\subsection{结果分析}
+从表中可以看出，四组实验中 \texttt{yv8s\_ft\_base} 的综合表现最好，验证集上取得了 \texttt{mAP@0.5 = 0.566} 和 \texttt{mAP@0.5:0.95 = 0.315}。将学习率降低到 0.005 后，模型性能下降；在较低学习率基础上进一步延长训练到 150 epoch，也未能超过 baseline。说明在本数据集上，YOLOv8s 在 100 epoch 左右已经基本收敛，继续降低学习率或延长训练轮数并未带来额外收益。
+
+同时，从零开始训练的 \texttt{yv8s\_scratch} 性能明显低于预训练微调方案，说明预训练权重对于本任务具有明显帮助。该结果满足作业中关于“预训练消融实验”的要求，也表明使用预训练初始化能够显著提升检测性能与收敛效率。
+
+因此，后续视频跟踪与越线统计实验统一采用 \texttt{yv8s\_ft\_base} 的最佳权重作为最终检测模型。
+
+\subsection{训练过程可视化}
+本实验使用 Weights \& Biases 记录训练过程中的 loss 与验证指标变化。
+
+\begin{figure}[H]
+\centering
+\IfFileExists{figures/train.png}{
+    \includegraphics[width=0.95\textwidth]{figures/train.png}
+}{
+    \missingfigure[0.95\textwidth]{待补充 W\&B 训练损失曲线截图}
+}
+\caption{W\&B 记录的训练损失曲线}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\IfFileExists{figures/metrics.png}{
+    \includegraphics[width=0.95\textwidth]{figures/metrics.png}
+}{
+    \missingfigure[0.95\textwidth]{待补充 W\&B 验证集 mAP 曲线截图}
+}
+\caption{W\&B 记录的验证集 mAP 曲线}
+\end{figure}
+
+\section{视频流检测与多目标跟踪}
+
+\subsection{实验设置}
+在完成检测模型选择后，使用最佳模型 \texttt{yv8s\_ft\_base} 对测试视频进行逐帧推理，并结合 YOLOv8 内置的 ByteTrack 跟踪器实现多目标跟踪。视频中每个检测到的目标都同时输出边界框、类别标签和唯一的 Tracking ID。
+
+\subsection{跟踪结果}
+跟踪结果视频保存为带可视化标注的 \texttt{tracked\_video.mp4}，
+逐帧跟踪记录保存为 \texttt{tracks.csv}。
+从结果可以看出，大部分车辆在连续帧中能够维持稳定 ID，
+表明训练得到的检测模型能够支持基础的多目标跟踪任务。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{figures/tracking_overview.png}
+\caption{视频多目标跟踪结果示意图}
+\end{figure}
+
+\subsection{类别稳定性分析}
+在视频多目标跟踪结果中，除了部分目标出现瞬时漏检与 ID 跳变外，还观察到同一目标在连续帧中的类别预测不稳定现象。具体表现为：同一车辆在相邻帧之间可能被预测为不同但外观相近的类别，例如 \texttt{car}、\texttt{van}、\texttt{minivan} 或 \texttt{suv} 之间发生切换。该现象说明检测模型在细粒度类别区分上仍存在一定不确定性，尤其是在目标尺寸较小、视角变化明显、局部遮挡存在或视频清晰度有限时，类别判别更容易波动。
+
+造成类别跳变的主要原因包括：不同车辆类别之间外观差异有限，部分类别样本数量较少，导致模型对类别边界学习不充分；同时，视频逐帧检测本质上是对每一帧独立推理，相邻帧之间并没有显式的类别一致性约束，因此当目标置信度接近或视觉特征不稳定时，同一目标可能在连续帧中被赋予不同类别标签。该现象虽然不一定直接导致轨迹中断，但会影响跟踪结果的语义一致性，并可能对后续基于类别的统计任务产生干扰。
+
+\section{遮挡、瞬时漏检与 ID 跳变分析}
+在测试视频中选取了一段连续 4 帧的片段，用于分析目标遮挡与 ID 稳定性。观察发现，目标车辆在前两帧中能够被正常检测并维持稳定 Tracking ID，但在第 3 帧中该车辆发生瞬时漏检；下一帧中该车辆重新被检测到，但跟踪器为其分配了新的 ID，产生了 ID switch。
+
+需要指出的是，这一片段中 4 帧画面在肉眼观察下变化很小，目标外观与位置并未发生明显突变，因此该现象并不完全是严重遮挡导致，更可能反映了检测结果在连续帧之间的不稳定性。为进一步验证这一点，实验将 tracking 阶段的检测置信度阈值由 \texttt{0.25} 降低至 \texttt{0.15}，并在同一片段上重复实验。结果显示，第 3 帧仍然发生漏检，说明该问题并非主要由阈值过滤过严造成，而更可能来源于检测模型在复杂场景下的瞬时检测不稳定。
+
+多目标跟踪算法依赖逐帧检测结果进行数据关联。当关键帧发生漏检时，原有轨迹会暂时中断；当目标重新出现时，若其未能与先前轨迹成功匹配，跟踪器就会新建轨迹并赋予新的 ID，从而产生 ID switch。该案例说明，在实际视频场景中，检测器的帧间稳定性会直接影响多目标跟踪效果。
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}{0.48\textwidth}
+  \includegraphics[width=\textwidth]{figures/occlusion_frames/frame_000223.jpg}
+  \caption{第 223 帧}
+\end{subfigure}
+\begin{subfigure}{0.48\textwidth}
+  \includegraphics[width=\textwidth]{figures/occlusion_frames/frame_000224.jpg}
+  \caption{第 224 帧}
+\end{subfigure}
+
+\vspace{0.5em}
+
+\begin{subfigure}{0.48\textwidth}
+  \includegraphics[width=\textwidth]{figures/occlusion_frames/frame_000225.jpg}
+  \caption{第 225 帧：目标瞬时漏检}
+\end{subfigure}
+\begin{subfigure}{0.48\textwidth}
+  \includegraphics[width=\textwidth]{figures/occlusion_frames/frame_000226.jpg}
+  \caption{第 226 帧：目标重新出现但 ID 改变}
+\end{subfigure}
+\caption{遮挡/瞬时漏检导致的 ID 跳变案例}
+\end{figure}
+
+\section{越线统计}
+
+\subsection{统计方法}
+在视频偏下区域设置一条水平虚拟线，起点坐标为 \texttt{(320, 480)}，终点坐标为 \texttt{(960, 480)}。对于每个被跟踪目标，计算其检测框中心点在连续帧中的位置变化。当同一 Tracking ID 对应的中心点从虚拟线一侧移动到另一侧时，判定该目标发生了一次越线事件，并累计计数。为避免同一目标重复统计，本实验对同一 Tracking ID 仅计数一次。
+
+\subsection{不同置信度下的计数结果}
+为考察越线统计对检测阈值的敏感性，分别在 \texttt{conf=0.25}、\texttt{0.15} 和 \texttt{0.10} 三种设置下重复实验。三组实验的最终跨线计数结果完全一致，均为 \texttt{22}，说明在本视频场景与当前虚拟线设置下，该越线统计方法对检测阈值变化不敏感，具有较好的稳定性。
+
+\begin{table}[H]
+\centering
+\caption{不同置信度阈值下的越线统计结果}
+\begin{tabular}{ccc}
+\toprule
+Confidence Threshold & Cross Count & Conclusion \\
+\midrule
+0.25 & 22 & stable \\
+0.15 & 22 & stable \\
+0.10 & 22 & stable \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\textwidth]{figures/line_count_result.png}
+\caption{越线统计结果示意图}
+\end{figure}
+
+\section{结论}
+本实验完成了基于 YOLOv8s 的道路车辆目标检测、多目标跟踪和越线统计任务。通过四组训练实验对比发现，使用预训练权重进行微调的 \texttt{yv8s\_ft\_base} 模型取得了最佳结果，验证了预训练初始化在本任务中的有效性。在视频多目标跟踪实验中，模型能够为大部分目标分配稳定的 Tracking ID；在部分复杂片段中，出现了由瞬时漏检引发的轨迹中断和 ID 跳变，说明检测稳定性对跟踪性能具有直接影响。在越线统计实验中，最终统计到 22 个跨线目标，且不同置信度设置下结果一致，说明该计数方法在当前场景下具有较好的鲁棒性。
+
+\section{提交信息}
+\begin{itemize}
+    \item Github 仓库链接：\textcolor{red}{https://github.com/jiangjingshuang2-stack/DeepLearning-task2/tree/main}
+    \item 模型权重网盘链接：\textcolor{red}{https://drive.google.com/file/d/1eyvbHHofc9YsnlsATPGVeZBm0GJxF62f/view}
+\end{itemize}
+
+\end{document}
